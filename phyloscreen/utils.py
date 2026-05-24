@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pandas import DataFrame
 
-logger = logging.getLogger("phenoscreen")
+logger = logging.getLogger("phyloscreen")
 
 
 

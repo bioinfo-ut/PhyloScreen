@@ -1,12 +1,12 @@
 [tool.poetry]
-name = "phenoscreen"
+name = "phyloscreen"
 version = "0.1.0"
 description = ""
 authors = ["Janar Aava <janar.aava@ut.ee>"]
 readme = "README.md"
 
 [tool.poetry.scripts]
-phenoscreen = "phenoscreen.cli:app"
+phyloscreen = "phyloscreen.cli:app"
 
 [tool.poetry.dependencies]
 python = "^3.13"

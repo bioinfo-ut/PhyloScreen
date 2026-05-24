@@ -1,10 +1,10 @@
-# PhenoScreen
+# PhyloScreen
 
 A command-line tool for predicting bacterial phenotypes (e.g., antimicrobial resistance) from whole-genome sequences using [Mash](https://github.com/marbl/Mash) screen and logistic regression.
 
 ## Overview
 
-PhenoScreen works in two stages:
+PhyloScreen works in two stages:
 
 1. **Train** — Build a Mash sketch from labeled reference genomes, extract features from pairwise Mash screen results, and train a logistic regression classifier.
 2. **Predict** — Screen a query genome against the reference sketch and classify its phenotype using the trained model.
@@ -23,12 +23,12 @@ PhenoScreen works in two stages:
 ## Installation
 
 ```bash
-git clone https://github.com/bioinfo-ut/PhenoScreen.git
-cd PhenoScreen
+git clone https://github.com/bioinfo-ut/PhyloScreen.git
+cd PhyloScreen
 
 # Create the Conda environment (installs Mash via bioconda)
 conda env create -f environment.yml
-conda activate phenoscreen
+conda activate phyloscreen
 
 # Install the Python package
 poetry install
@@ -52,7 +52,7 @@ Where `phenotype` is `1` (positive, e.g., resistant) or `0` (negative, e.g., sus
 Run training:
 
 ```bash
-phenoscreen train -i refs.tsv -o model_dir/
+phyloscreen train -i refs.tsv -o model_dir/
 ```
 
 Options:
@@ -70,7 +70,7 @@ Options:
 ### Predicting phenotypes
 
 ```bash
-phenoscreen predict -q query.fasta -m model_dir/ -o result.tsv
+phyloscreen predict -q query.fasta -m model_dir/ -o result.tsv
 ```
 
 The query can be a single FASTA/FASTQ file or a directory containing multiple files (e.g. multiple read files for one isolate). Supported extensions: `.fasta`, `.fa`, `.fna`, `.fastq`, `.fq` (and their `.gz` variants).

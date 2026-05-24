@@ -5,11 +5,11 @@ from rich.panel import Panel
 from pathlib import Path
 from typing import Optional
 
-from phenoscreen import __version__
-from phenoscreen.utils import setup_logging
+from phyloscreen import __version__
+from phyloscreen.utils import setup_logging
 
 app = typer.Typer(
-    name="phenoscreen",
+    name="phyloscreen",
     help="Predict bacterial phenotypes using mash screen and logistic regression.",
     add_completion=False,
     rich_markup_mode="rich",
@@ -20,7 +20,7 @@ console = Console()
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
-        console.print(f"[bold blue]phenoscreen[/] version [green]{__version__}[/]")
+        console.print(f"[bold blue]phyloscreen[/] version [green]{__version__}[/]")
         raise typer.Exit()
 
 
@@ -36,10 +36,10 @@ def main(
     ),
 ) -> None:
     """
-    PhenoScreen: Predict bacterial phenotypes using mash screen and logistic regression.
+    PhyloScreen: Predict bacterial phenotypes using mash screen and logistic regression.
 
-    Use 'phenoscreen train' to build a model from reference genomes,
-    then 'phenoscreen predict' to classify a query genome.
+    Use 'phyloscreen train' to build a model from reference genomes,
+    then 'phyloscreen predict' to classify a query genome.
     """
     pass
 
@@ -104,7 +104,7 @@ def train(
     mash screen results, and trains a logistic regression classifier.
 
     [bold]Example:[/]
-        phenoscreen train -i refs.tsv -o model_v1/
+        phyloscreen train -i refs.tsv -o model_v1/
     """
     setup_logging(verbose=verbose)
 
@@ -114,12 +114,12 @@ def train(
             f"Input: [cyan]{input}[/]\n"
             f"Output: [cyan]{output}[/]\n"
             f"Threads: [cyan]{threads}[/]\n",
-            title="[blue]phenoscreen train[/]",
+            title="[blue]phyloscreen train[/]",
         )
     )
 
     # Import here to avoid circular imports and speed up --help
-    from phenoscreen.train import train_model
+    from phyloscreen.train import train_model
 
     try:
         result = train_model(
@@ -186,7 +186,7 @@ def predict(
     and predicts phenotype using the trained model.
 
     [bold]Example:[/]
-        phenoscreen predict -q query.fasta -m model_v1/ -o result.tsv
+        phyloscreen predict -q query.fasta -m model_v1/ -o result.tsv
     """
     setup_logging(verbose=verbose)
 
@@ -196,12 +196,12 @@ def predict(
             f"Query: [cyan]{query}[/]\n"
             f"Model: [cyan]{model}[/]\n"
             f"Output: [cyan]{output}[/]",
-            title="[blue]phenoscreen predict[/]",
+            title="[blue]phyloscreen predict[/]",
         )
     )
 
     # Import here to avoid circular imports and speed up --help
-    from phenoscreen.predict import predict_phenotype
+    from phyloscreen.predict import predict_phenotype
 
     try:
         results = predict_phenotype(

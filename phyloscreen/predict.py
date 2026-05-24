@@ -4,10 +4,10 @@ from typing import Optional
 
 import pandas as pd
 
-from phenoscreen.features import FeatureExtractor
-from phenoscreen.mash import screen
-from phenoscreen.model import Model
-from phenoscreen.utils import find_fasta_files, logger
+from phyloscreen.features import FeatureExtractor
+from phyloscreen.mash import screen
+from phyloscreen.model import Model
+from phyloscreen.utils import find_fasta_files, logger
 
 
 @dataclass

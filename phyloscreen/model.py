@@ -10,8 +10,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from phenoscreen.features import FeatureExtractor, FEATURE_NAMES
-from phenoscreen.utils import logger, ensure_dir
+from phyloscreen.features import FeatureExtractor, FEATURE_NAMES
+from phyloscreen.utils import logger, ensure_dir
 
 
 @dataclass

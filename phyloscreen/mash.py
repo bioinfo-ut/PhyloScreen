@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from phenoscreen.utils import logger
+from phyloscreen.utils import logger
 
 _OVERFLOW_MARKER = "robin_hood::map overflow"
 

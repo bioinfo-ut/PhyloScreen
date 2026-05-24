@@ -1,4 +1,4 @@
-name: phenoscreen
+name: phyloscreen
 channels:
   - bioconda
   - conda-forge

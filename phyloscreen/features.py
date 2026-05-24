@@ -6,7 +6,7 @@ Extracts ML features from mash screen results based on reference phenotypes.
 
 from dataclasses import dataclass, field
 
-from phenoscreen.utils import logger
+from phyloscreen.utils import logger
 
 import numpy as np
 import pandas as pd

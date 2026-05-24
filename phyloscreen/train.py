@@ -1,5 +1,5 @@
 """
-Training pipeline for phenoscreen.
+Training pipeline for phyloscreen.
 
 Orchestrates the full training workflow:
 1. Validate inputs
@@ -20,10 +20,10 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from phenoscreen.features import FeatureExtractor
-from phenoscreen.mash import check_mash, sketch, screen
-from phenoscreen.model import TrainingResult, PhenotypeModel, Model
-from phenoscreen.utils import (
+from phyloscreen.features import FeatureExtractor
+from phyloscreen.mash import check_mash, sketch, screen
+from phyloscreen.model import TrainingResult, PhenotypeModel, Model
+from phyloscreen.utils import (
     logger, validate_references, ensure_dir,
 )
 
