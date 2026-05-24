@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "phenoscreen"
+version = "0.1.0"
+description = ""
+authors = ["Janar Aava <janar.aava@ut.ee>"]
+readme = "README.md"
+
+[tool.poetry.scripts]
+phenoscreen = "phenoscreen.cli:app"
+
+[tool.poetry.dependencies]
+python = "^3.13"
+typer = "^0.21.1"
+pandas = "^3.0.0"
+numpy = "^2.4.2"
+scikit-learn = "^1.8.0"
+rich = "^14.3.2"
+pydantic = ">=2.0.0"
+PyYAML = ">=6.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

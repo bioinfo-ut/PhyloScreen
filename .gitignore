@@ -1,0 +1,8 @@
+/test
+.venv
+.idea
+__pycache__/
+*.pyc
+dist/
+poetry.lock
+poetry.toml
