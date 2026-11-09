@@ -6,10 +6,14 @@ A command-line tool for predicting bacterial phenotypes (e.g., antimicrobial res
 
 PhyloScreen works in two stages:
 
-1. **Train** — Build a Mash sketch from labeled reference genomes, extract features from pairwise Mash screen results, and train a logistic regression classifier.
-2. **Predict** — Screen a query genome against the reference sketch and classify its phenotype using the trained model.
+1. **Train** — Build a Mash sketch from labeled reference genomes, extract features from pairwise Mash screen results, and train one logistic regression classifier per phenotype.
+2. **Predict** — Screen a query genome once against the reference sketch and classify every phenotype in the model bundle.
+
+A single model bundle can cover any number of phenotypes (for example one column per antibiotic), and reference isolates may have missing values for some of them.
 
 ### Features used for classification
+
+Features are computed separately for each phenotype, using only the reference isolates that have a value for that phenotype:
 
 - **Top hit phenotype** — phenotype label of the closest reference genome
 - **Shared hashes ratio** — ratio of shared hashes between the top phenotype-1 hit and the top phenotype-0 hit
@@ -38,16 +42,19 @@ poetry install
 
 ### Training a model
 
-Prepare a tab-separated reference file (`refs.tsv`) with columns `path` and `phenotype`:
+Prepare a tab-separated reference file (`refs.tsv`) with a `path` column followed by one or more phenotype columns. Every column other than `path` is treated as a phenotype, named by its header:
 
 ```
-path	phenotype
-/data/genomes/sample_001.fa	0
-/data/genomes/sample_002.fa	1
+path	ampicillin	cefotaxime	ciprofloxacin
+/data/genomes/sample_001.fa	1	0	
+/data/genomes/sample_002.fa	0		1
+/data/genomes/sample_003.fa	1	1	0
 ...
 ```
 
-Where `phenotype` is `1` (positive, e.g., resistant) or `0` (negative, e.g., susceptible).
+Each phenotype value is `1` (positive, e.g., resistant), `0` (negative, e.g., susceptible) or blank (unknown). An isolate with a blank value is still included in the Mash sketch, but for that phenotype it is excluded from training and is never chosen as a nearest neighbour; it is used normally for the other phenotypes.
+
+Every phenotype needs both classes present, with at least as many labelled isolates per class as there are cross-validation folds (3); otherwise training stops with an error naming the phenotype.
 
 Run training:
 
@@ -59,7 +66,7 @@ Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-i`, `--input` | *(required)* | TSV file with columns: path, phenotype |
+| `-i`, `--input` | *(required)* | TSV file with column `path` plus one or more phenotype columns |
 | `-o`, `--output` | *(required)* | Output directory for the trained model |
 | `-k`, `--kmer_size` | 21 | K-mer size for Mash sketch |
 | `-s`, `--sketch_size` | 100000 | Sketch size for Mash sketch |
@@ -87,12 +94,13 @@ Options:
 
 ### Output format
 
-The prediction output is a TSV file with columns:
+The prediction output is a TSV file with one row per phenotype in the model bundle and columns:
 
 | Column | Description |
 |--------|-------------|
 | `query_path` | Path to the query genome |
-| `prediction` | Predicted phenotype (1 or 0) |
+| `phenotype` | Phenotype name (column header from the training TSV) |
+| `prediction` | Predicted phenotype (1 or 0; `unknown` if the query had no Mash hits) |
 | `probability` | Probability of phenotype 1 |
 | `top_hit_1` | Closest reference with phenotype 1 |
 | `top_hit_1_identity` | Mash identity to that reference |
@@ -106,7 +114,10 @@ The prediction output is a TSV file with columns:
 After training, the output directory contains:
 
 - `reference_sketch.msh` — Mash sketch of all reference genomes
-- `model.joblib` — Trained scikit-learn pipeline (StandardScaler + LogisticRegression)
-- `labels.tsv` — Reference genome paths and their phenotype labels
-- `coefficients.json` — Logistic regression feature coefficients
+- `model.joblib` — Dictionary of trained scikit-learn pipelines (StandardScaler + LogisticRegression), one per phenotype
+- `labels.tsv` — Reference genome paths and all phenotype columns (blank = missing)
+- `coefficients.json` — Logistic regression feature coefficients per phenotype
+- `metadata.json` — Phenotype names, feature names, Mash parameters and the selected regularisation strength per phenotype
 - `screen_results/` — Per-reference Mash screen results used during training
+
+Model directories created by PhyloScreen 1.0.0 (single `phenotype` column, no `metadata.json`) are still loaded by `predict` and reported as a phenotype named `phenotype`.

@@ -1,6 +1,7 @@
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from pathlib import Path
 from typing import Optional
@@ -50,7 +51,7 @@ def train(
         ...,
         "--input",
         "-i",
-        help="TSV file with columns: path, phenotype (1/0)",
+        help="TSV file with column 'path' plus one or more phenotype columns (1/0, blank = missing).",
         exists=True,
         file_okay=True,
         dir_okay=False,
@@ -101,7 +102,9 @@ def train(
     Train a phenotype prediction model from reference genomes.
 
     Builds a mash sketch from reference genomes, extracts features based on
-    mash screen results, and trains a logistic regression classifier.
+    mash screen results, and trains one logistic regression classifier per
+    phenotype column. Isolates with a blank value for a phenotype are left out
+    of that phenotype's training and neighbour pool but still used for the others.
 
     [bold]Example:[/]
         phyloscreen train -i refs.tsv -o model_v1/
@@ -130,9 +133,27 @@ def train(
             threads=threads,
             seed=seed
         )
-        console.print(f"\n[green]✓[/] Model trained successfully!")
-        console.print(f"  Accuracy: [bold]{result.accuracy:.3f}[/]")
-        console.print(f"  AUC: [bold]{result.auc:.3f}[/]")
+        console.print(f"\n[green]✓[/] Model trained successfully ({len(result.results)} phenotype(s))")
+
+        table = Table(title="Cross-validation metrics", show_lines=False)
+        table.add_column("Phenotype", style="bold")
+        table.add_column("n", justify="right")
+        table.add_column("AUC", justify="right")
+        table.add_column("Accuracy", justify="right")
+        table.add_column("Precision", justify="right")
+        table.add_column("Recall", justify="right")
+        table.add_column("F1", justify="right")
+        for r in result.results.values():
+            table.add_row(
+                r.phenotype,
+                str(r.n_labelled),
+                f"{r.auc:.3f}",
+                f"{r.accuracy:.3f}",
+                f"{r.precision:.3f}",
+                f"{r.recall:.3f}",
+                f"{r.f1:.3f}",
+            )
+        console.print(table)
         console.print(f"  Model saved to: [cyan]{output}[/]")
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")
@@ -163,7 +184,7 @@ def predict(
         ...,
         "--output",
         "-o",
-        help="Output file path (TSV or JSON based on extension).",
+        help="Output TSV path (one row per phenotype).",
         resolve_path=True,
     ),
     threads: int = typer.Option(
@@ -180,10 +201,11 @@ def predict(
     ),
 ) -> None:
     """
-    Predict phenotype for query genome.
+    Predict all phenotypes in a model bundle for a query genome.
 
-    Runs mash screen against the reference sketch, extracts features,
-    and predicts phenotype using the trained model.
+    Runs mash screen once against the reference sketch, then extracts features
+    and predicts each phenotype with its own classifier. The output TSV has one
+    row per phenotype.
 
     [bold]Example:[/]
         phyloscreen predict -q query.fasta -m model_v1/ -o result.tsv
@@ -210,7 +232,9 @@ def predict(
             output_path=output,
             threads=threads,
         )
-        console.print(f"\n[green]✓[/] Prediction complete!")
+        console.print(f"\n[green]✓[/] Prediction complete ({len(results)} phenotype(s))")
+        for r in results:
+            console.print(f"  {r.phenotype}: [bold]{r.prediction}[/] (p={r.probability:.3f})")
         console.print(f"  Results saved to: [cyan]{output}[/]")
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")

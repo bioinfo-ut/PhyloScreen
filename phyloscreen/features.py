@@ -6,7 +6,7 @@ Extracts ML features from mash screen results based on reference phenotypes.
 
 from dataclasses import dataclass, field
 
-from phyloscreen.utils import logger
+from phyloscreen.utils import DEFAULT_PHENOTYPE, labelled_subset, logger
 
 import numpy as np
 import pandas as pd
@@ -31,7 +31,11 @@ class FeatureSet:
 
 class FeatureExtractor:
     """
-    Extract ML features from mash screen results.
+    Extract ML features from mash screen results for one phenotype.
+
+    Only references with a non-missing value for the chosen phenotype take part:
+    hits to unlabelled references are dropped before the top hit, the shared-hash
+    ratio and the weighted vote are computed.
 
     Features include:
     - Top hit phenotype
@@ -42,15 +46,19 @@ class FeatureExtractor:
     def __init__(
             self,
             references_df: DataFrame,
+            phenotype: str = DEFAULT_PHENOTYPE,
     ):
         """
         Initialize feature extractor.
 
         Args:
-            references_df: Dict mapping reference genome ID to phenotype.
+            references_df: Reference table with a ``path`` column and one or more
+                phenotype columns (missing values allowed).
+            phenotype: Name of the phenotype column to extract features for.
         """
         self.feature_names: list[str] = FEATURE_NAMES
-        self.references_df = references_df
+        self.phenotype = phenotype
+        self.references_df = labelled_subset(references_df, phenotype)
 
     def extract(self, screen_results: DataFrame, query_path: str = "") -> FeatureSet:
         """
@@ -64,23 +72,31 @@ class FeatureExtractor:
         Returns:
             FeatureSet with extracted features.
         """
-        # Separate by phenotype
+        # Restrict to labelled references and annotate with phenotype
         results_with_labels = self._annotate_phenotypes(screen_results)
 
         phenotype_1 = results_with_labels[results_with_labels["phenotype"] == 1]
         phenotype_0 = results_with_labels[results_with_labels["phenotype"] == 0]
 
-        features = []
-
         top_phenotype = results_with_labels["phenotype"].iloc[0] if len(results_with_labels) > 0 else -1
-        hash_ratio = phenotype_1['shared_hashes'].max() / phenotype_0['shared_hashes'].max()
-        top10 = results_with_labels.head(10)
-        weighted_vote_top10 = (top10['shared_hashes'] * top10['phenotype'].astype(int)).sum() / top10['shared_hashes'].sum()
 
-        features.extend([top_phenotype, hash_ratio, weighted_vote_top10])
+        # Guard against a class with no hits so the ratio stays finite
+        max_1 = phenotype_1['shared_hashes'].max() if len(phenotype_1) > 0 else 0
+        max_0 = max(phenotype_0['shared_hashes'].max(), 1) if len(phenotype_0) > 0 else 1
+        hash_ratio = max_1 / max_0
+
+        top10 = results_with_labels.head(10)
+        top10_total = top10['shared_hashes'].sum()
+        weighted_vote_top10 = (
+            (top10['shared_hashes'] * top10['phenotype'].astype(int)).sum() / top10_total
+            if top10_total > 0 else 0.0
+        )
+
+        features = [top_phenotype, hash_ratio, weighted_vote_top10]
 
         metadata = {
-            "n_hits_total": len(screen_results),
+            "phenotype": self.phenotype,
+            "n_hits_total": len(results_with_labels),
             "n_hits_1": len(phenotype_1),
             "n_hits_0": len(phenotype_0),
             "top_hit_1": (
@@ -98,23 +114,26 @@ class FeatureExtractor:
         }
 
         return FeatureSet(
-            features=np.array(features),
+            features=np.array(features, dtype=float),
             feature_names=self.feature_names,
             query_path=query_path,
             metadata=metadata,
         )
 
     def _annotate_phenotypes(self, screen_results: pd.DataFrame) -> pd.DataFrame:
-        """Add phenotype column to screen results based on reference labels."""
+        """
+        Add a phenotype column to screen results.
+
+        The inner merge keeps only hits to references labelled for this phenotype,
+        which is what restricts the neighbour pool to isolates with a known value.
+        """
         df = screen_results.copy()
         df = df.merge(self.references_df[["path", "phenotype"]], left_on="reference_path", right_on="path")
 
-        # Log any missing phenotypes
-        missing = df[df["phenotype"].isna()]["reference_path"].unique()
-        if len(missing) > 0:
-            logger.warning(
-                "References without phenotype labels: %s", missing.tolist()
+        dropped = len(screen_results) - len(df)
+        if dropped > 0:
+            logger.debug(
+                "%s: ignored %d hit(s) to references without a label", self.phenotype, dropped
             )
-            df = df.dropna(subset=["phenotype"])
 
         return df
