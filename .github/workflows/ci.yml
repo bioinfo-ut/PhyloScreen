@@ -13,11 +13,16 @@ jobs:
       run:
         shell: bash -el {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: mamba-org/setup-micromamba@v2
         with:
           environment-name: ci
+          condarc: |
+            channels:
+              - conda-forge
+              - bioconda
+            channel_priority: strict
           create-args: >-
             python=3.13
             mash>=2.3
