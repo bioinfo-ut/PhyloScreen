@@ -5,7 +5,7 @@ from typing import Callable, Optional, Union
 import pandas as pd
 
 from phyloscreen.features import FeatureExtractor, FeatureSet
-from phyloscreen.intermediate import feature_row, write_screen_results, write_table
+from phyloscreen.intermediate import FEATURE_TABLE_COLUMNS, feature_row, write_screen_results, write_table
 from phyloscreen.mash import screen
 from phyloscreen.model import Model
 from phyloscreen.utils import find_fasta_files, logger
@@ -40,10 +40,11 @@ class QueryResult:
     query_id: str
     query_path: str
     phenotype: str
-    prediction: Union[int, str]   # 0, 1, "unknown" (no hits) or "error"
-    probability: float
-    prob_1: float
-    prob_0: float
+    prediction: Union[int, str]   # 0, 1, "unknown" (no labelled hits) or "error"
+    # Probabilities are None when there is no prediction ("unknown" / "error")
+    probability: Optional[float] = None
+    prob_1: Optional[float] = None
+    prob_0: Optional[float] = None
     top_hit_1: Optional[str] = None
     top_hit_1_identity: Optional[float] = None
     top_hit_1_shared_hashes: Optional[int] = None
@@ -177,7 +178,11 @@ def predict_queries(
     _save_results(batch.results, output_path)
     logger.info("Results saved to %s", output_path)
     if intermediate_dir is not None:
-        write_table(feature_rows, Path(intermediate_dir) / "features.tsv")
+        write_table(
+            feature_rows,
+            Path(intermediate_dir) / "features.tsv",
+            columns=["query_id", "query_path", "phenotype", *FEATURE_TABLE_COLUMNS],
+        )
         logger.info("Intermediate files saved to %s", intermediate_dir)
     if batch.failures:
         logger.warning("%d of %d isolate(s) failed", len(batch.failures), len(queries))
@@ -228,7 +233,7 @@ def _predict_query(
     Screen one isolate and predict every phenotype from the shared screen results.
 
     Returns the per-phenotype results and, for the intermediate feature table,
-    one row per phenotype (empty when the isolate had no hits).
+    one row per predicted phenotype (none for phenotypes that came out ``unknown``).
     """
     if query.path.is_dir():
         query_files = find_fasta_files(query.path)
@@ -268,19 +273,30 @@ def _predict_one(
         model,
         screen_results: pd.DataFrame,
 ) -> tuple[QueryResult, Optional[FeatureSet]]:
-    """Predict a single phenotype from shared screen results; FeatureSet is None when there were no hits."""
+    """
+    Predict a single phenotype from shared screen results.
+
+    The result is ``unknown`` (and the FeatureSet None) when the isolate has no
+    hits to references labelled for this phenotype, whether because the screen
+    was empty or because every hit was to a reference with a missing label.
+    """
+    unknown = QueryResult(
+        query_id=query.id,
+        query_path=str(query.path),
+        phenotype=phenotype,
+        prediction="unknown",
+    )
     if screen_results.empty:
-        return QueryResult(
-            query_id=query.id,
-            query_path=str(query.path),
-            phenotype=phenotype,
-            prediction="unknown",
-            probability=0.0,
-            prob_1=0.0,
-            prob_0=0.0,
-        ), None
+        return unknown, None
 
     fs = extractor.extract(screen_results, query.id)
+    if fs.metadata["n_hits_total"] == 0:
+        logger.warning(
+            "Query %s: no hits to references labelled for %r (%d hit(s) to unlabelled references)",
+            query.id, phenotype, len(screen_results),
+        )
+        return unknown, None
+
     X = fs.features.reshape(1, -1)
 
     prediction = model.predict(X)[0]
@@ -318,9 +334,6 @@ def _error_results(query: Query, phenotypes: list[str], message: str) -> list[Qu
             query_path=str(query.path),
             phenotype=phenotype,
             prediction="error",
-            probability=0.0,
-            prob_1=0.0,
-            prob_0=0.0,
             error=message,
         )
         for phenotype in phenotypes
@@ -358,7 +371,8 @@ def _save_results(results: list[QueryResult], output_path: Path) -> None:
             "query_path": r.query_path,
             "phenotype": r.phenotype,
             "prediction": r.prediction,
-            "probability": f"{r.probability:.3f}",
+            # Blank when there is no prediction, so it cannot be read as "confident 0"
+            "probability": None if r.probability is None else f"{r.probability:.3f}",
             "top_hit_1": r.top_hit_1,
             "top_hit_1_identity": r.top_hit_1_identity,
             "top_hit_1_shared_hashes": r.top_hit_1_shared_hashes,

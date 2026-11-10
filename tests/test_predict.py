@@ -116,9 +116,42 @@ def test_predict_empty_screen_gives_unknown(trained_bundle, monkeypatch):
     results = predict_phenotype(Path(panel.paths[0]), out, panel.dir / "e.tsv", threads=1)
 
     assert [r.prediction for r in results] == ["unknown", "unknown"]
+    assert all(r.probability is None for r in results)
     df = pd.read_csv(panel.dir / "e.tsv", sep="\t")
     assert len(df) == 2
     assert df["prediction"].tolist() == ["unknown", "unknown"]
+    assert df["probability"].isna().all(), "no prediction must not be written as probability 0"
+
+
+def test_predict_unknown_when_only_unlabelled_references_hit(trained_bundle, monkeypatch):
+    """Hits only to cef-unlabelled references (g02, g03): cef is unknown, amp is still predicted."""
+    out, panel, _ = trained_bundle
+    full = make_fake_screen(panel)
+    unlabelled = [panel.paths[2], panel.paths[3]]
+
+    def only_unlabelled(query_paths, *a, **k):
+        df = full(query_paths, *a, **k)
+        return df[df["reference_path"].isin(unlabelled)].reset_index(drop=True)
+
+    monkeypatch.setattr(predict_mod, "screen", only_unlabelled)
+    query = panel.dir / "query.fa"
+    query.write_text(">q\nACGT\n")
+    inter = panel.dir / "inter"
+
+    results = predict_phenotype(query, out, panel.dir / "u.tsv", threads=1, intermediate_dir=inter)
+
+    amp, cef = results
+    assert amp.prediction in (0, 1) and amp.probability is not None
+    assert cef.prediction == "unknown"
+    assert cef.probability is None and cef.top_hit_1 is None and cef.top_hit_0 is None
+
+    df = pd.read_csv(panel.dir / "u.tsv", sep="\t").set_index("phenotype")
+    assert df.loc["cef", "prediction"] == "unknown"
+    assert pd.isna(df.loc["cef", "probability"])
+    assert not pd.isna(df.loc["amp", "probability"])
+    # Only the phenotype that was actually predicted has a feature row
+    feats = pd.read_csv(inter / "features.tsv", sep="\t")
+    assert feats["phenotype"].tolist() == ["amp"]
 
 
 def test_predict_single_query_fails_fast(trained_bundle, monkeypatch):
@@ -242,6 +275,8 @@ def test_predict_queries_continues_after_failures(trained_bundle, monkeypatch):
     assert good_rows["prediction"].tolist() == ["1", "1"]
     for qid in ("boom", "missing", "empty"):
         assert df[df["query_id"] == qid]["prediction"].tolist() == ["error", "error"]
+        assert df[df["query_id"] == qid]["probability"].isna().all()
+    assert good_rows["probability"].between(0, 1).all()
     assert df[df["query_id"] == "missing"]["top_hit_1"].isna().all()
 
 
@@ -284,6 +319,24 @@ def test_predict_intermediate_files(trained_bundle, monkeypatch):
     # cef pool excludes the two cef-unlabelled references
     assert feats.loc[feats["phenotype"] == "cef", "n_hits_total"].tolist() == [10, 10]
     assert feats.loc[feats["phenotype"] == "amp", "n_hits_total"].tolist() == [11, 11]
+
+
+def test_predict_intermediate_files_are_header_only_when_nothing_predicted(trained_bundle, monkeypatch):
+    out, panel, _ = trained_bundle
+    monkeypatch.setattr(predict_mod, "screen", lambda *a, **k: pd.DataFrame())
+    inter = panel.dir / "inter"
+
+    queries = [Query("nohits", _novel(panel, "nohits.fa")), Query("bad", panel.dir / "x.fa")]
+    predict_queries(queries, out, panel.dir / "o.tsv", threads=1, intermediate_dir=inter)
+
+    feats = pd.read_csv(inter / "features.tsv", sep="\t")
+    assert feats.empty
+    assert list(feats.columns[:3]) == ["query_id", "query_path", "phenotype"]
+    assert "weighted_vote_top10" in feats.columns and "top_hit_0" in feats.columns
+
+    screen = pd.read_csv(inter / "screen" / "nohits.tsv", sep="\t")
+    assert screen.empty
+    assert "shared_hashes" in screen.columns and "reference_path" in screen.columns
 
 
 def test_predict_without_intermediate_dir_writes_nothing_extra(trained_bundle, monkeypatch):

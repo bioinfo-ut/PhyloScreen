@@ -125,8 +125,8 @@ Both commands accept `--intermediate-dir DIR` to additionally save the data behi
 
 | File | Contents |
 |------|----------|
-| `screen/<query_id>.tsv` | The parsed Mash screen table for that isolate (identity, shared hashes, total hashes, median multiplicity, p-value, reference path), sorted by shared hashes. Written even when the isolate had no hits. |
-| `features.tsv` | One row per isolate and phenotype with the same columns as in training (`query_id`, `query_path` instead of `path`/`label`). Isolates that failed or had no hits have no rows. |
+| `screen/<query_id>.tsv` | The parsed Mash screen table for that isolate (identity, shared hashes, total hashes, median multiplicity, p-value, reference path), sorted by shared hashes. Written even when the isolate had no hits (header only). |
+| `features.tsv` | One row per isolate and phenotype with the same columns as in training (`query_id`, `query_path` instead of `path`/`label`). Rows are written only for actual predictions, not for `unknown` or `error` results. |
 
 The screen tables are the only sizeable output (one row per reference per isolate).
 
@@ -139,8 +139,8 @@ The prediction output is a TSV file with one row per isolate and phenotype, with
 | `query_id` | Isolate id (from the list file, otherwise the file stem or directory name) |
 | `query_path` | Path to the query genome |
 | `phenotype` | Phenotype name (column header from the training TSV) |
-| `prediction` | Predicted phenotype (1 or 0; `unknown` if the query had no Mash hits; `error` if the isolate could not be processed) |
-| `probability` | Probability of phenotype 1 |
+| `prediction` | Predicted phenotype (1 or 0; `unknown` if the query had no Mash hits to references labelled for that phenotype; `error` if the isolate could not be processed) |
+| `probability` | Probability of phenotype 1 (blank for `unknown` and `error`) |
 | `top_hit_1` | Closest reference with phenotype 1 |
 | `top_hit_1_identity` | Mash identity to that reference |
 | `top_hit_1_shared_hashes` | Shared hashes with that reference |

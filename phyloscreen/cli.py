@@ -279,7 +279,8 @@ def predict(
             raise typer.Exit(code=1)
         console.print(f"\n[green]✓[/] Prediction complete ({len(results)} phenotype(s))")
         for r in results:
-            console.print(f"  {r.query_id} {r.phenotype}: [bold]{r.prediction}[/] (p={r.probability:.3f})")
+            p = f" (p={r.probability:.3f})" if r.probability is not None else ""
+            console.print(f"  {r.query_id} {r.phenotype}: [bold]{r.prediction}[/]{p}")
         console.print(f"  Results saved to: [cyan]{output}[/]")
         if intermediate_dir is not None:
             console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")

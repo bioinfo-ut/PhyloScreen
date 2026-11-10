@@ -16,6 +16,17 @@ from phyloscreen.utils import logger
 
 _OVERFLOW_MARKER = "robin_hood::map overflow"
 
+# Columns of the table returned by parse_screen_output(), present even with no hits
+SCREEN_COLUMNS = [
+    "identity",
+    "shared_hashes",
+    "total_hashes",
+    "median_multiplicity",
+    "p_value",
+    "query_comment",
+    "reference_path",
+]
+
 
 @dataclass
 class MashVersion:
@@ -247,7 +258,7 @@ def parse_screen_output(output: str) -> pd.DataFrame:
                 }
             )
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=SCREEN_COLUMNS)
     if not df.empty:
         df = df.sort_values("shared_hashes", ascending=False).reset_index(drop=True)
     return df

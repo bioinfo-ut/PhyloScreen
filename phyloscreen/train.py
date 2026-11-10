@@ -22,7 +22,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from phyloscreen.features import FeatureExtractor
-from phyloscreen.intermediate import feature_row, write_table
+from phyloscreen.intermediate import FEATURE_TABLE_COLUMNS, feature_row, write_table
 from phyloscreen.mash import check_mash, sketch, screen
 from phyloscreen.model import TrainingResult, PhenotypeModel, Model
 from phyloscreen.utils import (
@@ -187,8 +187,16 @@ def train_model(
     model.save(output_dir)
 
     if intermediate_dir is not None:
-        write_table(feature_rows, Path(intermediate_dir) / "features.tsv")
-        write_table(cv_rows, Path(intermediate_dir) / "cv_predictions.tsv")
+        write_table(
+            feature_rows,
+            Path(intermediate_dir) / "features.tsv",
+            columns=["phenotype", "path", "label", *FEATURE_TABLE_COLUMNS],
+        )
+        write_table(
+            cv_rows,
+            Path(intermediate_dir) / "cv_predictions.tsv",
+            columns=["phenotype", "fold", "C", "path", "y_true", "y_pred", "y_proba"],
+        )
         logger.info("Intermediate files saved to %s", intermediate_dir)
 
     return TrainResult(
