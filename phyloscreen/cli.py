@@ -1,6 +1,7 @@
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from pathlib import Path
@@ -162,12 +163,22 @@ def train(
 
 @app.command()
 def predict(
-    query: Path = typer.Option(
-        ...,
+    query: Optional[Path] = typer.Option(
+        None,
         "--query",
         "-q",
-        help="Query genome FASTA/FASTQ file or directory of FASTAs/FASTQs.",
+        help="One isolate: a FASTA/FASTQ file, or a directory of read files belonging to that isolate.",
         exists=True,
+        resolve_path=True,
+    ),
+    query_list: Optional[Path] = typer.Option(
+        None,
+        "--query-list",
+        "-l",
+        help="TSV listing many isolates: column 'path' (file or directory per isolate) and optional 'id'.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
         resolve_path=True,
     ),
     model: Path = typer.Option(
@@ -201,43 +212,88 @@ def predict(
     ),
 ) -> None:
     """
-    Predict all phenotypes in a model bundle for a query genome.
+    Predict all phenotypes in a model bundle for one isolate or a list of isolates.
 
-    Runs mash screen once against the reference sketch, then extracts features
-    and predicts each phenotype with its own classifier. The output TSV has one
-    row per phenotype.
+    Runs mash screen once per isolate against the reference sketch, then extracts
+    features and predicts each phenotype with its own classifier. The output TSV
+    has one row per isolate and phenotype. Give exactly one of --query / --query-list.
 
-    [bold]Example:[/]
+    With --query-list, an isolate that fails (missing file, mash error) is written
+    with prediction 'error', the rest are still processed, and the exit code is 1.
+
+    [bold]Examples:[/]
         phyloscreen predict -q query.fasta -m model_v1/ -o result.tsv
+        phyloscreen predict -l queries.tsv -m model_v1/ -o results.tsv
     """
     setup_logging(verbose=verbose)
 
+    if (query is None) == (query_list is None):
+        console.print("[red]✗ Error:[/] give exactly one of --query/-q or --query-list/-l")
+        raise typer.Exit(code=2)
+
     console.print(
         Panel(
-            f"[bold]Predicting phenotype[/]\n\n"
-            f"Query: [cyan]{query}[/]\n"
-            f"Model: [cyan]{model}[/]\n"
+            f"[bold]Predicting phenotypes[/]\n\n"
+            + (f"Query: [cyan]{query}[/]\n" if query is not None else f"Query list: [cyan]{query_list}[/]\n")
+            + f"Model: [cyan]{model}[/]\n"
             f"Output: [cyan]{output}[/]",
             title="[blue]phyloscreen predict[/]",
         )
     )
 
     # Import here to avoid circular imports and speed up --help
-    from phyloscreen.predict import predict_phenotype
+    from phyloscreen import predict as predict_mod
 
-    try:
-        results = predict_phenotype(
-            query_path=query,
-            model_dir=model,
-            output_path=output,
-            threads=threads,
-        )
+    if query is not None:
+        try:
+            results = predict_mod.predict_phenotype(
+                query_path=query,
+                model_dir=model,
+                output_path=output,
+                threads=threads,
+            )
+        except Exception as e:
+            console.print(f"[red]✗ Error:[/] {e}")
+            raise typer.Exit(code=1)
         console.print(f"\n[green]✓[/] Prediction complete ({len(results)} phenotype(s))")
         for r in results:
-            console.print(f"  {r.phenotype}: [bold]{r.prediction}[/] (p={r.probability:.3f})")
+            console.print(f"  {r.query_id} {r.phenotype}: [bold]{r.prediction}[/] (p={r.probability:.3f})")
         console.print(f"  Results saved to: [cyan]{output}[/]")
+        return
+
+    try:
+        queries = predict_mod.read_query_list(query_list)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Predicting", total=len(queries))
+            batch = predict_mod.predict_queries(
+                queries,
+                model_dir=model,
+                output_path=output,
+                threads=threads,
+                on_progress=lambda q: progress.advance(task),
+            )
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+    n_phenotypes = len({r.phenotype for r in batch.results})
+    n_ok = len(queries) - len(batch.failures)
+    console.print(
+        f"\n[green]✓[/] Predicted {n_phenotypes} phenotype(s) for {n_ok}/{len(queries)} isolate(s)"
+    )
+    console.print(f"  Results saved to: [cyan]{output}[/]")
+    if batch.failures:
+        console.print(f"\n[red]✗ {len(batch.failures)} isolate(s) failed[/] (rows written with prediction 'error'):")
+        for qid, msg in batch.failures.items():
+            console.print(f"  {qid}: {msg}")
         raise typer.Exit(code=1)
 
 if __name__ == "__main__":

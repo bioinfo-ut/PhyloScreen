@@ -49,13 +49,15 @@ def panel(tmp_path: Path) -> Panel:
     return Panel(dir=tmp_path, refs_tsv=refs_tsv, paths=paths, truth=truth, table=table)
 
 
-def make_fake_screen(panel: Panel, query_truth: dict[str, int] | None = None):
+def make_fake_screen(panel: Panel, query_truth: dict | None = None):
     """
     Build a fake mash.screen(): shared hashes are higher between genomes that
     share hidden labels, so each phenotype has learnable signal.
 
-    A query that is not one of the panel genomes gets the hidden labels in
-    ``query_truth`` (defaults to amp=1, cef=1).
+    A query that is not one of the panel genomes gets hidden labels from
+    ``query_truth``: either one ``{"amp": .., "cef": ..}`` dict for every novel
+    query, or a mapping ``{str(path): {"amp": .., "cef": ..}}`` per query
+    (defaults to amp=1, cef=1).
     """
     index = {p: i for i, p in enumerate(panel.paths)}
     query_truth = query_truth or {"amp": 1, "cef": 1}
@@ -66,8 +68,8 @@ def make_fake_screen(panel: Panel, query_truth: dict[str, int] | None = None):
             q = index[qpath]
             q_truth = {k: v[q] for k, v in panel.truth.items()}
         else:
-            q = len(panel.paths)
-            q_truth = query_truth
+            q = len(panel.paths) + sum(map(ord, Path(qpath).name)) % 7
+            q_truth = query_truth[qpath] if qpath in query_truth else query_truth
         rows = []
         for ref, r in index.items():
             # Equal weights keep the top-10 vote positively correlated with both labels.

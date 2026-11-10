@@ -82,11 +82,27 @@ phyloscreen predict -q query.fasta -m model_dir/ -o result.tsv
 
 The query can be a single FASTA/FASTQ file or a directory containing multiple files (e.g. multiple read files for one isolate). Supported extensions: `.fasta`, `.fa`, `.fna`, `.fastq`, `.fq` (and their `.gz` variants).
 
+To predict many isolates in one run, give a tab-separated list instead of a single query. The list needs a `path` column (one isolate per row; a row may point to a file or to a directory of read files for that isolate) and may have an optional `id` column. Blank or absent ids default to the file stem (or the directory name):
+
+```
+path	id
+/data/queries/iso_001.fa	iso_001
+/data/queries/iso_002_reads/	iso_002
+/data/queries/iso_003.fq.gz	
+```
+
+```bash
+phyloscreen predict -l queries.tsv -m model_dir/ -o results.tsv
+```
+
+The model is loaded once and Mash screen runs once per isolate. If an isolate cannot be processed (missing file, empty directory, Mash error), its rows are written with `prediction` set to `error`, the remaining isolates are still predicted, and the command exits with code 1 after listing the failed isolates.
+
 Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-q`, `--query` | *(required)* | Query genome file or directory |
+| `-q`, `--query` | *(one of -q / -l)* | Query genome file or directory (one isolate) |
+| `-l`, `--query-list` | *(one of -q / -l)* | TSV listing many isolates (`path`, optional `id`) |
 | `-m`, `--model` | *(required)* | Path to trained model directory |
 | `-o`, `--output` | *(required)* | Output file path (TSV) |
 | `-t`, `--threads` | 4 | Number of threads |
@@ -94,13 +110,14 @@ Options:
 
 ### Output format
 
-The prediction output is a TSV file with one row per phenotype in the model bundle and columns:
+The prediction output is a TSV file with one row per isolate and phenotype, with columns:
 
 | Column | Description |
 |--------|-------------|
+| `query_id` | Isolate id (from the list file, otherwise the file stem or directory name) |
 | `query_path` | Path to the query genome |
 | `phenotype` | Phenotype name (column header from the training TSV) |
-| `prediction` | Predicted phenotype (1 or 0; `unknown` if the query had no Mash hits) |
+| `prediction` | Predicted phenotype (1 or 0; `unknown` if the query had no Mash hits; `error` if the isolate could not be processed) |
 | `probability` | Probability of phenotype 1 |
 | `top_hit_1` | Closest reference with phenotype 1 |
 | `top_hit_1_identity` | Mash identity to that reference |

@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import pandas as pd
 
@@ -10,6 +10,7 @@ from phyloscreen.model import Model
 from phyloscreen.utils import find_fasta_files, logger
 
 OUTPUT_COLUMNS = [
+    "query_id",
     "query_path",
     "phenotype",
     "prediction",
@@ -24,12 +25,21 @@ OUTPUT_COLUMNS = [
 
 
 @dataclass
+class Query:
+    """One isolate to predict: an id and a FASTA/FASTQ file or a directory of read files."""
+
+    id: str
+    path: Path
+
+
+@dataclass
 class QueryResult:
     """Prediction result for one query genome and one phenotype."""
 
+    query_id: str
     query_path: str
     phenotype: str
-    prediction: Union[int, str]
+    prediction: Union[int, str]   # 0, 1, "unknown" (no hits) or "error"
     probability: float
     prob_1: float
     prob_0: float
@@ -39,6 +49,129 @@ class QueryResult:
     top_hit_0: Optional[str] = None
     top_hit_0_identity: Optional[float] = None
     top_hit_0_shared_hashes: Optional[int] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class BatchResult:
+    """Results for a list of queries plus the isolates that failed (id -> message)."""
+
+    results: list[QueryResult] = field(default_factory=list)
+    failures: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def n_queries(self) -> int:
+        return len({r.query_id for r in self.results})
+
+
+def default_query_id(path: Path) -> str:
+    """Sample id derived from a path: directory name, or file stem without .gz and one extension."""
+    path = Path(path)
+    if path.is_dir():
+        return path.name
+    name = path.name
+    if name.endswith(".gz"):
+        name = name[:-3]
+    return Path(name).stem
+
+
+def read_query_list(list_file: Path) -> list[Query]:
+    """
+    Read a TSV of queries with a required ``path`` column and an optional ``id`` column.
+
+    Blank ids fall back to default_query_id(). Duplicate ids or paths are rejected.
+    Paths are not checked for existence here; a missing path is a per-isolate failure
+    reported by predict_queries().
+    """
+    df = pd.read_csv(list_file, sep="\t", dtype=str, keep_default_na=False)
+
+    if "path" not in df.columns:
+        raise ValueError(f"Query list {list_file} is missing a 'path' column")
+
+    paths = df["path"].str.strip()
+    if (paths == "").any():
+        rows = (df.index[paths == ""] + 2).tolist()  # 1-based, after header
+        raise ValueError(f"Query list has empty 'path' values on line(s): {rows}")
+
+    ids = df["id"].str.strip() if "id" in df.columns else pd.Series([""] * len(df), index=df.index)
+    queries = [
+        Query(id=i if i else default_query_id(Path(p)), path=Path(p))
+        for i, p in zip(ids, paths)
+    ]
+
+    dup_paths = paths[paths.duplicated()].unique().tolist()
+    if dup_paths:
+        raise ValueError(f"Duplicate query paths: {dup_paths}")
+    seen, dup_ids = set(), []
+    for q in queries:
+        if q.id in seen and q.id not in dup_ids:
+            dup_ids.append(q.id)
+        seen.add(q.id)
+    if dup_ids:
+        raise ValueError(f"Duplicate query ids: {dup_ids}")
+
+    if not queries:
+        raise ValueError(f"Query list {list_file} contains no queries")
+
+    return queries
+
+
+def predict_queries(
+        queries: list[Query],
+        model_dir: Path,
+        output_path: Path,
+        threads: int = 4,
+        on_progress: Optional[Callable[[Query], None]] = None,
+        raise_on_error: bool = False,
+) -> BatchResult:
+    """
+    Predict every phenotype in the bundle for a list of isolates.
+
+    The bundle is loaded once and mash screen runs once per isolate. A failing
+    isolate is logged, written as ``error`` rows (one per phenotype) and recorded
+    in BatchResult.failures; the remaining isolates are still processed.
+
+    Args:
+        queries: Isolates to predict.
+        model_dir: Path to trained model directory.
+        output_path: Output TSV (one row per isolate and phenotype).
+        threads: Threads for mash screen.
+        on_progress: Called after each isolate is finished (success or failure).
+        raise_on_error: Re-raise the first failure instead of recording it.
+    """
+    bundle = Model.load(model_dir)
+    logger.info("Loaded model from %s", model_dir)
+
+    sketch_path = Path(model_dir) / "reference_sketch.msh"
+    if not sketch_path.exists():
+        raise FileNotFoundError(f"Reference sketch not found: {sketch_path}")
+
+    extractors = {p: FeatureExtractor(bundle.references, p) for p in bundle.phenotypes}
+    logger.info("Predicting %d phenotype(s) for %d isolate(s)", len(extractors), len(queries))
+
+    batch = BatchResult()
+    for query in queries:
+        try:
+            batch.results.extend(
+                _predict_query(query, bundle, extractors, sketch_path, threads)
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad isolate must not stop the batch
+            if raise_on_error:
+                raise
+            message = f"{type(exc).__name__}: {exc}"
+            logger.error("Query %s failed: %s", query.id, message)
+            batch.failures[query.id] = message
+            batch.results.extend(_error_results(query, bundle.phenotypes, message))
+        finally:
+            if on_progress is not None:
+                on_progress(query)
+
+    _save_results(batch.results, output_path)
+    logger.info("Results saved to %s", output_path)
+    if batch.failures:
+        logger.warning("%d of %d isolate(s) failed", len(batch.failures), len(queries))
+
+    return batch
 
 
 def predict_phenotype(
@@ -48,10 +181,7 @@ def predict_phenotype(
         threads: int = 4,
 ) -> list[QueryResult]:
     """
-    Predict every phenotype in the model bundle for a query genome.
-
-    Mash screen runs once; each phenotype's classifier then uses only the
-    references labelled for that phenotype as neighbours.
+    Predict every phenotype in the model bundle for a single query genome.
 
     Args:
         query_path: Path to query FASTA/FASTQ file or directory of FASTQs.
@@ -61,60 +191,58 @@ def predict_phenotype(
 
     Returns:
         List of QueryResult objects, one per phenotype.
+
+    Raises:
+        Whatever the screening or prediction raised (single queries fail fast).
     """
-    # Load model bundle
-    bundle = Model.load(model_dir)
-    logger.info("Loaded model from %s", model_dir)
+    query = Query(id=default_query_id(query_path), path=Path(query_path))
+    batch = predict_queries([query], model_dir, output_path, threads=threads, raise_on_error=True)
+    return batch.results
 
-    # Find query files
-    if query_path.is_dir():
-        query_files = find_fasta_files(query_path)
+
+def _predict_query(
+        query: Query,
+        bundle: Model,
+        extractors: dict[str, FeatureExtractor],
+        sketch_path: Path,
+        threads: int,
+) -> list[QueryResult]:
+    """Screen one isolate and predict every phenotype from the shared screen results."""
+    if query.path.is_dir():
+        query_files = find_fasta_files(query.path)
+    elif query.path.is_file():
+        query_files = [query.path]
     else:
-        query_files = [query_path]
+        raise FileNotFoundError(f"Query not found: {query.path}")
 
-    logger.info("Processing %d query genome(s)", len(query_files))
+    logger.debug("Query %s: %d file(s)", query.id, len(query_files))
 
-    # Find sketch path
-    sketch_path = model_dir / "reference_sketch.msh"
-    if not sketch_path.exists():
-        raise FileNotFoundError(f"Reference sketch not found: {sketch_path}")
-
-    query_id = ",".join([str(p) for p in query_files])
-    logger.debug("Processing query: %s", query_id)
-
-    # Run mash screen once for all phenotypes
     screen_results = screen(
         query_paths=query_files,
         sketch_path=sketch_path,
-        threads=threads
+        threads=threads,
     )
-
     if screen_results.empty:
-        logger.warning("No hits for query %s", query_id)
+        logger.warning("No hits for query %s", query.id)
 
-    results = [
-        _predict_one(bundle, phenotype, screen_results, query_path, query_id)
+    return [
+        _predict_one(query, phenotype, extractors[phenotype], bundle.models[phenotype], screen_results)
         for phenotype in bundle.phenotypes
     ]
 
-    # Save results
-    _save_results(results, output_path)
-    logger.info("Result saved to %s", output_path)
-
-    return results
-
 
 def _predict_one(
-        bundle: Model,
+        query: Query,
         phenotype: str,
+        extractor: FeatureExtractor,
+        model,
         screen_results: pd.DataFrame,
-        query_path: Path,
-        query_id: str,
 ) -> QueryResult:
     """Predict a single phenotype from shared screen results."""
     if screen_results.empty:
         return QueryResult(
-            query_path=str(query_path),
+            query_id=query.id,
+            query_path=str(query.path),
             phenotype=phenotype,
             prediction="unknown",
             probability=0.0,
@@ -122,15 +250,12 @@ def _predict_one(
             prob_0=0.0,
         )
 
-    extractor = FeatureExtractor(bundle.references, phenotype)
-    fs = extractor.extract(screen_results, query_id)
+    fs = extractor.extract(screen_results, query.id)
     X = fs.features.reshape(1, -1)
 
-    model = bundle.models[phenotype]
     prediction = model.predict(X)[0]
     probas = model.predict_proba(X)[0]
 
-    # Map probabilities to classes
     class_idx = {int(c): i for i, c in enumerate(model.classes_)}
     prob_1 = float(probas[class_idx[1]])
     prob_0 = float(probas[class_idx[0]])
@@ -139,7 +264,8 @@ def _predict_one(
     top_hit_0 = fs.metadata.get("top_hit_0")
 
     return QueryResult(
-        query_path=str(query_path),
+        query_id=query.id,
+        query_path=str(query.path),
         phenotype=phenotype,
         prediction=int(prediction),
         probability=prob_1,
@@ -152,6 +278,23 @@ def _predict_one(
         top_hit_0_identity=_get_top_identity(screen_results, top_hit_0),
         top_hit_0_shared_hashes=_get_top_shared_hashes(screen_results, top_hit_0),
     )
+
+
+def _error_results(query: Query, phenotypes: list[str], message: str) -> list[QueryResult]:
+    """One ``error`` row per phenotype for an isolate that could not be processed."""
+    return [
+        QueryResult(
+            query_id=query.id,
+            query_path=str(query.path),
+            phenotype=phenotype,
+            prediction="error",
+            probability=0.0,
+            prob_1=0.0,
+            prob_0=0.0,
+            error=message,
+        )
+        for phenotype in phenotypes
+    ]
 
 
 def _get_top_identity(screen_results: pd.DataFrame, ref_path: Optional[str]) -> Optional[float]:
@@ -175,12 +318,13 @@ def _get_top_shared_hashes(screen_results: pd.DataFrame, ref_path: Optional[str]
 
 
 def _save_results(results: list[QueryResult], output_path: Path) -> None:
-    """Save prediction results to a TSV with one row per phenotype."""
+    """Save prediction results to a TSV with one row per isolate and phenotype."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = [
         {
+            "query_id": r.query_id,
             "query_path": r.query_path,
             "phenotype": r.phenotype,
             "prediction": r.prediction,
