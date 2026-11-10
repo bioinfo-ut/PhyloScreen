@@ -42,7 +42,10 @@ def test_predict_help_lists_query_list():
     result = runner.invoke(app, ["predict", "--help"])
     out = plain(result.output)
     assert "--query-list" in out
-    assert "phenotype columns" in plain(runner.invoke(app, ["train", "--help"]).output)
+    assert "--intermediate-dir" in out
+    train_out = plain(runner.invoke(app, ["train", "--help"]).output)
+    assert "phenotype columns" in train_out
+    assert "--intermediate-dir" in train_out
 
 
 def test_predict_requires_exactly_one_input(tmp_path):
@@ -72,7 +75,8 @@ def test_predict_list_exits_nonzero_on_failures(tmp_path, monkeypatch):
     lst = tmp_path / "l.tsv"
     lst.write_text("path\tid\n/x/a.fa\tA\n/x/b.fa\tB\n")
 
-    def fake_predict_queries(queries, model_dir, output_path, threads=4, on_progress=None, raise_on_error=False):
+    def fake_predict_queries(queries, model_dir, output_path, threads=4, on_progress=None,
+                             raise_on_error=False, intermediate_dir=None):
         assert [q.id for q in queries] == ["A", "B"]
         for q in queries:
             on_progress(q)

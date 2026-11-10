@@ -11,6 +11,7 @@ Orchestrates the full training workflow:
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from phyloscreen.features import FeatureExtractor
+from phyloscreen.intermediate import feature_row, write_table
 from phyloscreen.mash import check_mash, sketch, screen
 from phyloscreen.model import TrainingResult, PhenotypeModel, Model
 from phyloscreen.utils import (
@@ -64,6 +66,7 @@ def train_model(
     cv_folds: int = 3,
     threads: int = 4,
     seed: int = None,
+    intermediate_dir: Optional[Path] = None,
 ) -> TrainResult:
     """
         Train a phenotype prediction model bundle.
@@ -80,6 +83,10 @@ def train_model(
             sketch_size: Size of sketch.
             threads: Number of threads to use.
             seed: Seed for random number generator.
+            intermediate_dir: If given, save ``features.tsv`` (the per-reference
+                feature matrix the final models are fitted on) and
+                ``cv_predictions.tsv`` (out-of-fold predictions for every
+                reference, phenotype and C value) under this directory.
 
         Returns:
             TrainResult with per-phenotype training metrics.
@@ -121,6 +128,8 @@ def train_model(
     results: dict[str, PhenotypeTrainResult] = {}
     best_Cs: dict[str, float] = {}
     n_features = None
+    cv_rows: list[dict] = []
+    feature_rows: list[dict] = []
 
     for phenotype in phenotypes:
         sub_df = labelled_subset(references_df, phenotype)
@@ -130,20 +139,22 @@ def train_model(
         )
 
         logger.info("[%s] Running %d-fold cross-validation for parameter tuning...", phenotype, cv_folds)
-        cv_result, best_C, feature_names = _cross_validate(
+        cv_result, best_C, feature_names, phenotype_cv_rows = _cross_validate(
             references_df=sub_df,
             all_screen_results=all_screen_results,
             cv_folds=cv_folds,
             seed=seed,
         )
+        cv_rows.extend({"phenotype": phenotype, **row} for row in phenotype_cv_rows)
 
         logger.info("[%s] Training final model on all labelled isolates...", phenotype)
-        final_model = _train_final_model(
+        final_model, phenotype_feature_rows = _train_final_model(
             references_df=sub_df,
             all_screen_results=all_screen_results,
             best_C=best_C,
             seed=seed,
         )
+        feature_rows.extend({"phenotype": phenotype, **row} for row in phenotype_feature_rows)
         final_model.feature_names_ = feature_names
         n_features = len(feature_names)
 
@@ -174,6 +185,11 @@ def train_model(
         },
     )
     model.save(output_dir)
+
+    if intermediate_dir is not None:
+        write_table(feature_rows, Path(intermediate_dir) / "features.tsv")
+        write_table(cv_rows, Path(intermediate_dir) / "cv_predictions.tsv")
+        logger.info("Intermediate files saved to %s", intermediate_dir)
 
     return TrainResult(
         results=results,
@@ -248,7 +264,7 @@ def _cross_validate(
         all_screen_results: dict[str, DataFrame],
         cv_folds: int,
         seed: int,
-) -> tuple[TrainingResult, float | None, list[str]] | None:
+) -> tuple[TrainingResult, float | None, list[str], list[dict]]:
     """
     Perform cross-validation for hyperparameter tuning with per-fold data filtering.
 
@@ -269,14 +285,16 @@ def _cross_validate(
         seed: Random seed.
 
     Returns:
-        Tuple of (TrainingResult, best_C, feature_names)
+        Tuple of (TrainingResult, best_C, feature_names, cv_rows) where cv_rows
+        holds one dict per (fold, C, validation reference) with keys
+        fold, C, path, y_true, y_pred, y_proba.
     """
     y_all = references_df["phenotype"].to_numpy(dtype=int)
 
     skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
 
     C_values = np.logspace(-3, 2, 6).tolist()
-    results_per_C = {C: {"y_true": [], "y_pred": [], "y_proba": []} for C in C_values}
+    results_per_C = {C: {"y_true": [], "y_pred": [], "y_proba": [], "path": [], "fold": []} for C in C_values}
     feature_names = None
 
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(references_df, y_all)):
@@ -317,6 +335,7 @@ def _cross_validate(
 
         X_val = np.array(X_val)
         y_val = np.array(y_val, dtype=int)
+        val_paths = [references_df.iloc[i]["path"] for i in val_idx]
 
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
@@ -338,6 +357,8 @@ def _cross_validate(
             results_per_C[C]["y_true"].extend(y_val)
             results_per_C[C]["y_pred"].extend(y_pred)
             results_per_C[C]["y_proba"].extend(y_proba)
+            results_per_C[C]["path"].extend(val_paths)
+            results_per_C[C]["fold"].extend([fold_idx + 1] * len(val_idx))
 
     best_C = None
     best_auc = -1
@@ -362,7 +383,23 @@ def _cross_validate(
         confusion_matrix=confusion_matrix(y_true, y_pred),
     )
 
-    return training_result, best_C, feature_names
+    cv_rows = [
+        {
+            "fold": int(fold),
+            "C": C,
+            "path": path,
+            "y_true": int(yt),
+            "y_pred": int(yp),
+            "y_proba": float(pr),
+        }
+        for C in C_values
+        for fold, path, yt, yp, pr in zip(
+            results_per_C[C]["fold"], results_per_C[C]["path"],
+            results_per_C[C]["y_true"], results_per_C[C]["y_pred"], results_per_C[C]["y_proba"],
+        )
+    ]
+
+    return training_result, best_C, feature_names, cv_rows
 
 
 def _train_final_model(
@@ -370,7 +407,7 @@ def _train_final_model(
         all_screen_results: dict[str, pd.DataFrame],
         best_C: float,
         seed: int,
-) -> PhenotypeModel:
+) -> tuple[PhenotypeModel, list[dict]]:
     """
     Train final model on all labelled isolates for one phenotype.
 
@@ -384,13 +421,15 @@ def _train_final_model(
         seed: Random seed.
 
     Returns:
-        Trained PhenotypeModel.
+        Trained PhenotypeModel and the feature table rows it was fitted on
+        (one dict per reference: path, label, features and hit counts).
     """
     all_paths = set(references_df["path"])
     extractor = FeatureExtractor(references_df)
 
     X = []
     y = []
+    rows = []
     for _, row in references_df.iterrows():
         results = all_screen_results[row["path"]]
         # Exclude self (already done in _screen_all_references, but be safe)
@@ -398,6 +437,7 @@ def _train_final_model(
         fs = extractor.extract(filtered, row["path"])
         X.append(fs.features)
         y.append(row["phenotype"])
+        rows.append(feature_row(fs, path=row["path"], label=int(row["phenotype"])))
 
     X = np.array(X)
     y = np.array(y, dtype=int)
@@ -406,4 +446,4 @@ def _train_final_model(
     model.feature_names_ = extractor.feature_names
     model.fit(X, y)
 
-    return model
+    return model, rows

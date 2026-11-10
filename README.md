@@ -72,6 +72,7 @@ Options:
 | `-s`, `--sketch_size` | 100000 | Sketch size for Mash sketch |
 | `-t`, `--threads` | 4 | Number of threads |
 | `--seed` | None | Random seed for reproducibility |
+| `--intermediate-dir` | None | Also save intermediate files (see below) |
 | `--verbose` | False | Enable verbose logging |
 
 ### Predicting phenotypes
@@ -106,7 +107,28 @@ Options:
 | `-m`, `--model` | *(required)* | Path to trained model directory |
 | `-o`, `--output` | *(required)* | Output file path (TSV) |
 | `-t`, `--threads` | 4 | Number of threads |
+| `--intermediate-dir` | None | Also save intermediate files (see below) |
 | `--verbose` | False | Enable verbose logging |
+
+### Intermediate files
+
+Both commands accept `--intermediate-dir DIR` to additionally save the data behind the predictions. Nothing is written unless the option is given.
+
+`phyloscreen train --intermediate-dir DIR` writes:
+
+| File | Contents |
+|------|----------|
+| `features.tsv` | One row per reference and phenotype: `phenotype`, `path`, `label`, the three feature values, hit counts (`n_hits_total`, `n_hits_1`, `n_hits_0`) and the top hit per class. This is the matrix each final model was fitted on. |
+| `cv_predictions.tsv` | Out-of-fold predictions for every reference, phenotype, fold and regularisation value `C`: `y_true`, `y_pred`, `y_proba`. Lets you draw ROC curves or inspect how the `C` was chosen. |
+
+`phyloscreen predict --intermediate-dir DIR` writes:
+
+| File | Contents |
+|------|----------|
+| `screen/<query_id>.tsv` | The parsed Mash screen table for that isolate (identity, shared hashes, total hashes, median multiplicity, p-value, reference path), sorted by shared hashes. Written even when the isolate had no hits. |
+| `features.tsv` | One row per isolate and phenotype with the same columns as in training (`query_id`, `query_path` instead of `path`/`label`). Isolates that failed or had no hits have no rows. |
+
+The screen tables are the only sizeable output (one row per reference per isolate).
 
 ### Output format
 

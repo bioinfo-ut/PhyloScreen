@@ -57,6 +57,42 @@ def test_train_model_multi_phenotype(trained_bundle):
     assert bundle.references["amp"].isna().sum() == 1
 
 
+def test_train_model_intermediate_files(panel, monkeypatch):
+    from phyloscreen import train as train_mod
+    from tests.conftest import fake_sketch, make_fake_screen
+
+    monkeypatch.setattr(train_mod, "check_mash", lambda: "fake")
+    monkeypatch.setattr(train_mod, "sketch", fake_sketch)
+    monkeypatch.setattr(train_mod, "screen", make_fake_screen(panel))
+
+    inter = panel.dir / "inter"
+    result = train_mod.train_model(
+        panel.refs_tsv, panel.dir / "m", kmer_size=21, sketch_size=1000, cv_folds=3, seed=0,
+        intermediate_dir=inter,
+    )
+
+    feats = pd.read_csv(inter / "features.tsv", sep="\t")
+    assert list(feats.columns[:3]) == ["phenotype", "path", "label"]
+    assert feats["phenotype"].value_counts().to_dict() == {"amp": 11, "cef": 10}
+    assert set(feats["label"]) == {0, 1}
+    for col in ("top_phenotype", "shared_hashes_ratio", "weighted_vote_top10", "n_hits_total", "top_hit_1"):
+        assert col in feats.columns, col
+    # self-hit excluded: every reference sees the other labelled references only
+    assert feats.loc[feats["phenotype"] == "amp", "n_hits_total"].eq(10).all()
+    assert feats.loc[feats["phenotype"] == "cef", "n_hits_total"].eq(9).all()
+
+    cv = pd.read_csv(inter / "cv_predictions.tsv", sep="\t")
+    assert list(cv.columns) == ["phenotype", "fold", "C", "path", "y_true", "y_pred", "y_proba"]
+    assert cv["C"].nunique() == 6
+    assert len(cv) == (11 + 10) * 6
+    assert set(cv["fold"]) == {1, 2, 3}
+    # every labelled reference is validated exactly once per C and phenotype
+    per = cv.groupby(["phenotype", "C"])["path"].nunique()
+    assert per.loc["amp"].eq(11).all() and per.loc["cef"].eq(10).all()
+    assert cv["y_proba"].between(0, 1).all()
+    assert set(cv["phenotype"]) == set(result.phenotypes)
+
+
 def test_train_model_fails_on_sparse_phenotype(panel, monkeypatch):
     from phyloscreen import train as train_mod
 

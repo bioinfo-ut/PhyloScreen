@@ -4,7 +4,8 @@ from typing import Callable, Optional, Union
 
 import pandas as pd
 
-from phyloscreen.features import FeatureExtractor
+from phyloscreen.features import FeatureExtractor, FeatureSet
+from phyloscreen.intermediate import feature_row, write_screen_results, write_table
 from phyloscreen.mash import screen
 from phyloscreen.model import Model
 from phyloscreen.utils import find_fasta_files, logger
@@ -123,6 +124,7 @@ def predict_queries(
         threads: int = 4,
         on_progress: Optional[Callable[[Query], None]] = None,
         raise_on_error: bool = False,
+        intermediate_dir: Optional[Path] = None,
 ) -> BatchResult:
     """
     Predict every phenotype in the bundle for a list of isolates.
@@ -138,6 +140,9 @@ def predict_queries(
         threads: Threads for mash screen.
         on_progress: Called after each isolate is finished (success or failure).
         raise_on_error: Re-raise the first failure instead of recording it.
+        intermediate_dir: If given, save ``screen/<query_id>.tsv`` (parsed mash
+            screen table per isolate) and ``features.tsv`` (model inputs per
+            isolate and phenotype) under this directory.
     """
     bundle = Model.load(model_dir)
     logger.info("Loaded model from %s", model_dir)
@@ -150,11 +155,14 @@ def predict_queries(
     logger.info("Predicting %d phenotype(s) for %d isolate(s)", len(extractors), len(queries))
 
     batch = BatchResult()
+    feature_rows: list[dict] = []
     for query in queries:
         try:
-            batch.results.extend(
-                _predict_query(query, bundle, extractors, sketch_path, threads)
+            results, rows = _predict_query(
+                query, bundle, extractors, sketch_path, threads, intermediate_dir
             )
+            batch.results.extend(results)
+            feature_rows.extend(rows)
         except Exception as exc:  # noqa: BLE001 - one bad isolate must not stop the batch
             if raise_on_error:
                 raise
@@ -168,6 +176,9 @@ def predict_queries(
 
     _save_results(batch.results, output_path)
     logger.info("Results saved to %s", output_path)
+    if intermediate_dir is not None:
+        write_table(feature_rows, Path(intermediate_dir) / "features.tsv")
+        logger.info("Intermediate files saved to %s", intermediate_dir)
     if batch.failures:
         logger.warning("%d of %d isolate(s) failed", len(batch.failures), len(queries))
 
@@ -179,6 +190,7 @@ def predict_phenotype(
         model_dir: Path,
         output_path: Path,
         threads: int = 4,
+        intermediate_dir: Optional[Path] = None,
 ) -> list[QueryResult]:
     """
     Predict every phenotype in the model bundle for a single query genome.
@@ -188,6 +200,7 @@ def predict_phenotype(
         model_dir: Path to trained model directory.
         output_path: Path to output TSV (one row per phenotype).
         threads: Number of threads for parallel processing.
+        intermediate_dir: See predict_queries().
 
     Returns:
         List of QueryResult objects, one per phenotype.
@@ -196,7 +209,10 @@ def predict_phenotype(
         Whatever the screening or prediction raised (single queries fail fast).
     """
     query = Query(id=default_query_id(query_path), path=Path(query_path))
-    batch = predict_queries([query], model_dir, output_path, threads=threads, raise_on_error=True)
+    batch = predict_queries(
+        [query], model_dir, output_path, threads=threads,
+        raise_on_error=True, intermediate_dir=intermediate_dir,
+    )
     return batch.results
 
 
@@ -206,8 +222,14 @@ def _predict_query(
         extractors: dict[str, FeatureExtractor],
         sketch_path: Path,
         threads: int,
-) -> list[QueryResult]:
-    """Screen one isolate and predict every phenotype from the shared screen results."""
+        intermediate_dir: Optional[Path] = None,
+) -> tuple[list[QueryResult], list[dict]]:
+    """
+    Screen one isolate and predict every phenotype from the shared screen results.
+
+    Returns the per-phenotype results and, for the intermediate feature table,
+    one row per phenotype (empty when the isolate had no hits).
+    """
     if query.path.is_dir():
         query_files = find_fasta_files(query.path)
     elif query.path.is_file():
@@ -224,11 +246,19 @@ def _predict_query(
     )
     if screen_results.empty:
         logger.warning("No hits for query %s", query.id)
+    if intermediate_dir is not None:
+        write_screen_results(screen_results, intermediate_dir, query.id)
 
-    return [
-        _predict_one(query, phenotype, extractors[phenotype], bundle.models[phenotype], screen_results)
-        for phenotype in bundle.phenotypes
-    ]
+    results: list[QueryResult] = []
+    rows: list[dict] = []
+    for phenotype in bundle.phenotypes:
+        result, fs = _predict_one(
+            query, phenotype, extractors[phenotype], bundle.models[phenotype], screen_results
+        )
+        results.append(result)
+        if fs is not None:
+            rows.append(feature_row(fs, query_id=query.id, query_path=str(query.path), phenotype=phenotype))
+    return results, rows
 
 
 def _predict_one(
@@ -237,8 +267,8 @@ def _predict_one(
         extractor: FeatureExtractor,
         model,
         screen_results: pd.DataFrame,
-) -> QueryResult:
-    """Predict a single phenotype from shared screen results."""
+) -> tuple[QueryResult, Optional[FeatureSet]]:
+    """Predict a single phenotype from shared screen results; FeatureSet is None when there were no hits."""
     if screen_results.empty:
         return QueryResult(
             query_id=query.id,
@@ -248,7 +278,7 @@ def _predict_one(
             probability=0.0,
             prob_1=0.0,
             prob_0=0.0,
-        )
+        ), None
 
     fs = extractor.extract(screen_results, query.id)
     X = fs.features.reshape(1, -1)
@@ -277,7 +307,7 @@ def _predict_one(
         top_hit_0=top_hit_0,
         top_hit_0_identity=_get_top_identity(screen_results, top_hit_0),
         top_hit_0_shared_hashes=_get_top_shared_hashes(screen_results, top_hit_0),
-    )
+    ), fs
 
 
 def _error_results(query: Query, phenotypes: list[str], message: str) -> list[QueryResult]:

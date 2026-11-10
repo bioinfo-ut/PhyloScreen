@@ -93,6 +93,15 @@ def train(
         "--seed",
         help="Random seed for reproducibility.",
     ),
+    intermediate_dir: Optional[Path] = typer.Option(
+        None,
+        "--intermediate-dir",
+        help="Also save intermediate files here: features.tsv (per-reference model inputs) "
+             "and cv_predictions.tsv (out-of-fold predictions per phenotype and C).",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -132,7 +141,8 @@ def train(
             kmer_size=kmer_size,
             sketch_size=sketch_size,
             threads=threads,
-            seed=seed
+            seed=seed,
+            intermediate_dir=intermediate_dir,
         )
         console.print(f"\n[green]✓[/] Model trained successfully ({len(result.results)} phenotype(s))")
 
@@ -156,6 +166,8 @@ def train(
             )
         console.print(table)
         console.print(f"  Model saved to: [cyan]{output}[/]")
+        if intermediate_dir is not None:
+            console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")
         raise typer.Exit(code=1)
@@ -205,6 +217,15 @@ def predict(
         help="Number of threads for parallel processing.",
         min=1,
     ),
+    intermediate_dir: Optional[Path] = typer.Option(
+        None,
+        "--intermediate-dir",
+        help="Also save intermediate files here: screen/<query_id>.tsv (parsed mash screen "
+             "table per isolate) and features.tsv (model inputs per isolate and phenotype).",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -251,6 +272,7 @@ def predict(
                 model_dir=model,
                 output_path=output,
                 threads=threads,
+                intermediate_dir=intermediate_dir,
             )
         except Exception as e:
             console.print(f"[red]✗ Error:[/] {e}")
@@ -259,6 +281,8 @@ def predict(
         for r in results:
             console.print(f"  {r.query_id} {r.phenotype}: [bold]{r.prediction}[/] (p={r.probability:.3f})")
         console.print(f"  Results saved to: [cyan]{output}[/]")
+        if intermediate_dir is not None:
+            console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")
         return
 
     try:
@@ -279,6 +303,7 @@ def predict(
                 output_path=output,
                 threads=threads,
                 on_progress=lambda q: progress.advance(task),
+                intermediate_dir=intermediate_dir,
             )
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")
@@ -290,6 +315,8 @@ def predict(
         f"\n[green]✓[/] Predicted {n_phenotypes} phenotype(s) for {n_ok}/{len(queries)} isolate(s)"
     )
     console.print(f"  Results saved to: [cyan]{output}[/]")
+    if intermediate_dir is not None:
+        console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")
     if batch.failures:
         console.print(f"\n[red]✗ {len(batch.failures)} isolate(s) failed[/] (rows written with prediction 'error'):")
         for qid, msg in batch.failures.items():

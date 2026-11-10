@@ -243,3 +243,52 @@ def test_predict_queries_continues_after_failures(trained_bundle, monkeypatch):
     for qid in ("boom", "missing", "empty"):
         assert df[df["query_id"] == qid]["prediction"].tolist() == ["error", "error"]
     assert df[df["query_id"] == "missing"]["top_hit_1"].isna().all()
+
+
+# --- intermediate files ---------------------------------------------------------
+
+def test_predict_intermediate_files(trained_bundle, monkeypatch):
+    out, panel, _ = trained_bundle
+    q1 = _novel(panel, "iso one.fa")   # id with a space -> sanitised file name
+    q2 = _novel(panel, "iso2.fa")
+    truth = {str(q1): {"amp": 1, "cef": 0}, str(q2): {"amp": 0, "cef": 1}}
+    fake = make_fake_screen(panel, truth)
+
+    def screen_or_empty(query_paths, *a, **k):
+        if Path(str(query_paths[0])).name == "nohits.fa":
+            return pd.DataFrame()
+        return fake(query_paths, *a, **k)
+
+    monkeypatch.setattr(predict_mod, "screen", screen_or_empty)
+    nohits = _novel(panel, "nohits.fa")
+    inter = panel.dir / "inter"
+
+    queries = [Query("iso one", q1), Query("iso2", q2), Query("nohits", nohits), Query("bad", panel.dir / "x.fa")]
+    batch = predict_queries(queries, out, panel.dir / "o.tsv", threads=1, intermediate_dir=inter)
+    assert set(batch.failures) == {"bad"}
+
+    screens = sorted(p.name for p in (inter / "screen").iterdir())
+    assert screens == ["iso2.tsv", "iso_one.tsv", "nohits.tsv"]
+    s1 = pd.read_csv(inter / "screen" / "iso_one.tsv", sep="\t")
+    assert len(s1) == 12
+    assert "shared_hashes" in s1.columns and "reference_path" in s1.columns
+    assert s1["shared_hashes"].is_monotonic_decreasing
+
+    feats = pd.read_csv(inter / "features.tsv", sep="\t")
+    assert list(feats.columns[:3]) == ["query_id", "query_path", "phenotype"]
+    for col in ("top_phenotype", "shared_hashes_ratio", "weighted_vote_top10",
+                "n_hits_total", "n_hits_1", "n_hits_0", "top_hit_1", "top_hit_0"):
+        assert col in feats.columns, col
+    assert feats["query_id"].tolist() == ["iso one", "iso one", "iso2", "iso2"]
+    assert feats["phenotype"].tolist() == ["amp", "cef"] * 2
+    # cef pool excludes the two cef-unlabelled references
+    assert feats.loc[feats["phenotype"] == "cef", "n_hits_total"].tolist() == [10, 10]
+    assert feats.loc[feats["phenotype"] == "amp", "n_hits_total"].tolist() == [11, 11]
+
+
+def test_predict_without_intermediate_dir_writes_nothing_extra(trained_bundle, monkeypatch):
+    out, panel, _ = trained_bundle
+    monkeypatch.setattr(predict_mod, "screen", make_fake_screen(panel))
+    before = set(panel.dir.iterdir())
+    predict_phenotype(Path(panel.paths[0]), out, panel.dir / "only.tsv", threads=1)
+    assert set(panel.dir.iterdir()) - before == {panel.dir / "only.tsv"}
