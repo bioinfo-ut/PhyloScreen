@@ -23,7 +23,14 @@ def test_parse_screen_output_sorts_by_shared_hashes():
 
 
 def test_parse_screen_output_empty():
-    assert mash.parse_screen_output("").empty
+    df = mash.parse_screen_output("")
+    assert df.empty
+    assert list(df.columns) == mash.SCREEN_COLUMNS
+
+
+def test_parse_screen_output_columns_match_constant():
+    df = mash.parse_screen_output("0.99\t900/1000\t1\t0\tref_a.fa\n")
+    assert list(df.columns) == mash.SCREEN_COLUMNS
 
 
 def test_check_mash_parses_version(monkeypatch):

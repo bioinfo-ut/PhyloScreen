@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,12 +6,19 @@ from typing import Any, Optional
 
 import joblib
 import numpy as np
+import pandas as pd
+from pandas import DataFrame
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from phyloscreen.features import FeatureExtractor, FEATURE_NAMES
-from phyloscreen.utils import logger, ensure_dir
+from phyloscreen import __version__
+from phyloscreen.features import FEATURE_NAMES
+from phyloscreen.utils import (
+    DEFAULT_PHENOTYPE, PATH_COLUMN, logger, ensure_dir, phenotype_columns,
+)
+
+FORMAT_VERSION = 2
 
 
 @dataclass
@@ -40,10 +47,10 @@ class PredictionResult:
 
 class PhenotypeModel:
     """
-    Logistic regression model for phenotype prediction.
+    Logistic regression model for one phenotype.
 
-    Uses a pipeline with StandardScaler and LogisticRegressionCV.
-    LogisticRegressionCV handles regularization tuning via internal CV.
+    Uses a pipeline with StandardScaler and LogisticRegression; the regularisation
+    strength C is chosen by the cross-validation in phyloscreen.train.
     """
 
     def __init__(self, best_C: Optional[float] = None, seed: Optional[int] = None):
@@ -53,7 +60,7 @@ class PhenotypeModel:
         self.model = Pipeline([
             ("scaler", StandardScaler()),
             ("classifier", LogisticRegression(
-                C=best_C,
+                C=best_C if best_C is not None else 1.0,
                 solver="lbfgs",
                 max_iter=1000,
                 class_weight="balanced",
@@ -62,6 +69,15 @@ class PhenotypeModel:
         ])
         self.classes_: Optional[np.ndarray] = None
         self.feature_names_: Optional[list[str]] = FEATURE_NAMES
+
+    @classmethod
+    def from_pipeline(cls, pipeline: Pipeline, feature_names: Optional[list[str]] = None) -> "PhenotypeModel":
+        """Wrap an already-fitted sklearn pipeline."""
+        model = cls()
+        model.model = pipeline
+        model.classes_ = pipeline.named_steps["classifier"].classes_
+        model.feature_names_ = feature_names or FEATURE_NAMES
+        return model
 
     def fit(
             self,
@@ -101,51 +117,75 @@ class PhenotypeModel:
         names = self.feature_names_ or [
             f"feature_{i}" for i in range(len(coefs))
         ]
-        return dict(zip(names, coefs))
+        return {name: float(c) for name, c in zip(names, coefs)}
 
 
 @dataclass
 class Model:
     """
-    Complete model for serialization.
+    Complete model bundle for serialization: one classifier per phenotype plus the
+    reference table (with missing labels) they were trained on.
     """
 
-    model: PhenotypeModel
-    labels: dict[str, int]
+    models: dict[str, PhenotypeModel]
+    references: DataFrame
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def phenotypes(self) -> list[str]:
+        """Phenotype names in training order."""
+        return list(self.metadata.get("phenotypes") or self.models.keys())
 
     def save(self, output_dir: Path) -> None:
         """
         Save model to directory.
 
         Creates:
-        - model.joblib: Trained sklearn pipeline (scaler + classifier)
-        - coefficients.json: Feature coefficients
+        - model.joblib: dict phenotype -> trained sklearn pipeline (scaler + classifier)
+        - labels.tsv: reference paths and all phenotype columns (blank = missing)
+        - coefficients.json: feature coefficients per phenotype
+        - metadata.json: format version, phenotype names, feature names, parameters
 
         Args:
             output_dir: Directory to save bundle.
         """
         output_dir = ensure_dir(output_dir)
 
-        # Save the full pipeline (includes scaler)
-        joblib.dump(self.model.model, output_dir / "model.joblib")
+        joblib.dump({p: m.model for p, m in self.models.items()}, output_dir / "model.joblib")
 
-        with open(output_dir / "labels.tsv", "w") as f:
-            f.write("path\tphenotype\n")
-            for path, phenotype in sorted(self.labels.items()):
-                f.write(f"{path}\t{phenotype}\n")
+        self.references.to_csv(output_dir / "labels.tsv", sep="\t", index=False, na_rep="")
 
-        # Save coefficients for interpretability
-        if self.model.classes_ is not None:
-            coefs = self.model.get_coefficients()
-            with open(output_dir / "coefficients.json", "w") as f:
-                json.dump(coefs, f, indent=2)
+        coefs = {
+            p: m.get_coefficients()
+            for p, m in self.models.items()
+            if m.classes_ is not None
+        }
+        with open(output_dir / "coefficients.json", "w") as f:
+            json.dump(coefs, f, indent=2)
 
-        logger.info("Model saved to %s", output_dir)
+        metadata = {
+            "format_version": FORMAT_VERSION,
+            "phyloscreen_version": __version__,
+            "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "phenotypes": self.phenotypes,
+            "feature_names": FEATURE_NAMES,
+            **{k: v for k, v in self.metadata.items() if k not in {"format_version", "phenotypes"}},
+        }
+        with open(output_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+        self.metadata = metadata
+
+        logger.info("Model saved to %s (%d phenotype(s))", output_dir, len(self.models))
 
     @classmethod
     def load(cls, model_dir: Path) -> "Model":
         """
         Load model from directory.
+
+        Supports both the current bundle layout (metadata.json present) and the
+        single-phenotype layout written by phyloscreen 1.0.0 (a bare pipeline in
+        model.joblib and a two-column labels.tsv), which loads as one phenotype
+        named ``phenotype``.
 
         Args:
             model_dir: Directory containing saved model.
@@ -158,28 +198,54 @@ class Model:
         """
         model_dir = Path(model_dir)
 
-        # Load pipeline
         model_path = model_dir / "model.joblib"
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found: {model_path}")
+        labels_path = model_dir / "labels.tsv"
+        if not labels_path.exists():
+            raise FileNotFoundError(f"Labels file not found: {labels_path}")
 
-        sklearn_pipeline = joblib.load(model_path)
-        model = PhenotypeModel()
-        model.model = sklearn_pipeline
-        model.classes_ = sklearn_pipeline.named_steps["classifier"].classes_
+        payload = joblib.load(model_path)
+        references = pd.read_csv(labels_path, sep="\t")
+        metadata_path = model_dir / "metadata.json"
 
-        labels = {}
-        with open(model_dir / "labels.tsv") as f:
-            next(f)  # Skip header
-            for line in f:
-                path, phenotype = line.strip().split("\t")
-                labels[path] = int(phenotype)
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+            if not isinstance(payload, dict):
+                raise ValueError(f"Unexpected model.joblib contents in {model_dir}")
+            feature_names = metadata.get("feature_names", FEATURE_NAMES)
+            models = {
+                p: PhenotypeModel.from_pipeline(pipeline, feature_names)
+                for p, pipeline in payload.items()
+            }
+            phenotypes = metadata.get("phenotypes") or list(models.keys())
+        else:
+            # Legacy phyloscreen 1.0.0 bundle
+            if isinstance(payload, dict):
+                raise ValueError(f"metadata.json missing for multi-phenotype bundle in {model_dir}")
+            logger.info("Loading legacy single-phenotype bundle from %s", model_dir)
+            if DEFAULT_PHENOTYPE not in references.columns:
+                raise ValueError(f"Legacy labels.tsv must have a {DEFAULT_PHENOTYPE!r} column")
+            models = {DEFAULT_PHENOTYPE: PhenotypeModel.from_pipeline(payload)}
+            phenotypes = [DEFAULT_PHENOTYPE]
+            metadata = {
+                "format_version": 1,
+                "phenotypes": phenotypes,
+                "feature_names": FEATURE_NAMES,
+            }
 
-        # Load metadata
+        missing = [p for p in phenotypes if p not in models]
+        if missing:
+            raise ValueError(f"Phenotypes listed in metadata but missing from model.joblib: {missing}")
+        missing_cols = [p for p in phenotypes if p not in references.columns]
+        if missing_cols:
+            raise ValueError(f"Phenotypes missing from labels.tsv: {missing_cols}")
 
-        logger.info("Model loaded from %s", model_dir)
+        for col in phenotype_columns(references):
+            references[col] = references[col].astype("Int64")
+        metadata["phenotypes"] = phenotypes
 
-        return cls(
-            model=model,
-            labels=labels,
-        )
+        logger.info("Model loaded from %s (%d phenotype(s))", model_dir, len(models))
+
+        return cls(models=models, references=references, metadata=metadata)

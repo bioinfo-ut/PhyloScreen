@@ -1,6 +1,6 @@
 [project]
 name = "phyloscreen"
-version = "1.0.0"
+version = "1.1.0"
 description = "Predict bacterial phenotypes (e.g. antimicrobial resistance) from genome assemblies using Mash screen and logistic regression"
 authors = [{ name = "Janar Aava", email = "janar.aava@ut.ee" }]
 license = "GPL-3.0-or-later"

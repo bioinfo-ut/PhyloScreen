@@ -1,6 +1,8 @@
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
 
 from pathlib import Path
 from typing import Optional
@@ -50,7 +52,7 @@ def train(
         ...,
         "--input",
         "-i",
-        help="TSV file with columns: path, phenotype (1/0)",
+        help="TSV file with column 'path' plus one or more phenotype columns (1/0, blank = missing).",
         exists=True,
         file_okay=True,
         dir_okay=False,
@@ -91,6 +93,15 @@ def train(
         "--seed",
         help="Random seed for reproducibility.",
     ),
+    intermediate_dir: Optional[Path] = typer.Option(
+        None,
+        "--intermediate-dir",
+        help="Also save intermediate files here: features.tsv (per-reference model inputs) "
+             "and cv_predictions.tsv (out-of-fold predictions per phenotype and C).",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -101,7 +112,9 @@ def train(
     Train a phenotype prediction model from reference genomes.
 
     Builds a mash sketch from reference genomes, extracts features based on
-    mash screen results, and trains a logistic regression classifier.
+    mash screen results, and trains one logistic regression classifier per
+    phenotype column. Isolates with a blank value for a phenotype are left out
+    of that phenotype's training and neighbour pool but still used for the others.
 
     [bold]Example:[/]
         phyloscreen train -i refs.tsv -o model_v1/
@@ -128,12 +141,33 @@ def train(
             kmer_size=kmer_size,
             sketch_size=sketch_size,
             threads=threads,
-            seed=seed
+            seed=seed,
+            intermediate_dir=intermediate_dir,
         )
-        console.print(f"\n[green]✓[/] Model trained successfully!")
-        console.print(f"  Accuracy: [bold]{result.accuracy:.3f}[/]")
-        console.print(f"  AUC: [bold]{result.auc:.3f}[/]")
+        console.print(f"\n[green]✓[/] Model trained successfully ({len(result.results)} phenotype(s))")
+
+        table = Table(title="Cross-validation metrics", show_lines=False)
+        table.add_column("Phenotype", style="bold")
+        table.add_column("n", justify="right")
+        table.add_column("AUC", justify="right")
+        table.add_column("Accuracy", justify="right")
+        table.add_column("Precision", justify="right")
+        table.add_column("Recall", justify="right")
+        table.add_column("F1", justify="right")
+        for r in result.results.values():
+            table.add_row(
+                r.phenotype,
+                str(r.n_labelled),
+                f"{r.auc:.3f}",
+                f"{r.accuracy:.3f}",
+                f"{r.precision:.3f}",
+                f"{r.recall:.3f}",
+                f"{r.f1:.3f}",
+            )
+        console.print(table)
         console.print(f"  Model saved to: [cyan]{output}[/]")
+        if intermediate_dir is not None:
+            console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")
         raise typer.Exit(code=1)
@@ -141,12 +175,22 @@ def train(
 
 @app.command()
 def predict(
-    query: Path = typer.Option(
-        ...,
+    query: Optional[Path] = typer.Option(
+        None,
         "--query",
         "-q",
-        help="Query genome FASTA/FASTQ file or directory of FASTAs/FASTQs.",
+        help="One isolate: a FASTA/FASTQ file, or a directory of read files belonging to that isolate.",
         exists=True,
+        resolve_path=True,
+    ),
+    query_list: Optional[Path] = typer.Option(
+        None,
+        "--query-list",
+        "-l",
+        help="TSV listing many isolates: column 'path' (file or directory per isolate) and optional 'id'.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
         resolve_path=True,
     ),
     model: Path = typer.Option(
@@ -163,7 +207,7 @@ def predict(
         ...,
         "--output",
         "-o",
-        help="Output file path (TSV or JSON based on extension).",
+        help="Output TSV path (one row per phenotype).",
         resolve_path=True,
     ),
     threads: int = typer.Option(
@@ -173,6 +217,15 @@ def predict(
         help="Number of threads for parallel processing.",
         min=1,
     ),
+    intermediate_dir: Optional[Path] = typer.Option(
+        None,
+        "--intermediate-dir",
+        help="Also save intermediate files here: screen/<query_id>.tsv (parsed mash screen "
+             "table per isolate) and features.tsv (model inputs per isolate and phenotype).",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -180,40 +233,95 @@ def predict(
     ),
 ) -> None:
     """
-    Predict phenotype for query genome.
+    Predict all phenotypes in a model bundle for one isolate or a list of isolates.
 
-    Runs mash screen against the reference sketch, extracts features,
-    and predicts phenotype using the trained model.
+    Runs mash screen once per isolate against the reference sketch, then extracts
+    features and predicts each phenotype with its own classifier. The output TSV
+    has one row per isolate and phenotype. Give exactly one of --query / --query-list.
 
-    [bold]Example:[/]
+    With --query-list, an isolate that fails (missing file, mash error) is written
+    with prediction 'error', the rest are still processed, and the exit code is 1.
+
+    [bold]Examples:[/]
         phyloscreen predict -q query.fasta -m model_v1/ -o result.tsv
+        phyloscreen predict -l queries.tsv -m model_v1/ -o results.tsv
     """
     setup_logging(verbose=verbose)
 
+    if (query is None) == (query_list is None):
+        console.print("[red]✗ Error:[/] give exactly one of --query/-q or --query-list/-l")
+        raise typer.Exit(code=2)
+
     console.print(
         Panel(
-            f"[bold]Predicting phenotype[/]\n\n"
-            f"Query: [cyan]{query}[/]\n"
-            f"Model: [cyan]{model}[/]\n"
+            f"[bold]Predicting phenotypes[/]\n\n"
+            + (f"Query: [cyan]{query}[/]\n" if query is not None else f"Query list: [cyan]{query_list}[/]\n")
+            + f"Model: [cyan]{model}[/]\n"
             f"Output: [cyan]{output}[/]",
             title="[blue]phyloscreen predict[/]",
         )
     )
 
     # Import here to avoid circular imports and speed up --help
-    from phyloscreen.predict import predict_phenotype
+    from phyloscreen import predict as predict_mod
+
+    if query is not None:
+        try:
+            results = predict_mod.predict_phenotype(
+                query_path=query,
+                model_dir=model,
+                output_path=output,
+                threads=threads,
+                intermediate_dir=intermediate_dir,
+            )
+        except Exception as e:
+            console.print(f"[red]✗ Error:[/] {e}")
+            raise typer.Exit(code=1)
+        console.print(f"\n[green]✓[/] Prediction complete ({len(results)} phenotype(s))")
+        for r in results:
+            p = f" (p={r.probability:.3f})" if r.probability is not None else ""
+            console.print(f"  {r.query_id} {r.phenotype}: [bold]{r.prediction}[/]{p}")
+        console.print(f"  Results saved to: [cyan]{output}[/]")
+        if intermediate_dir is not None:
+            console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")
+        return
 
     try:
-        results = predict_phenotype(
-            query_path=query,
-            model_dir=model,
-            output_path=output,
-            threads=threads,
-        )
-        console.print(f"\n[green]✓[/] Prediction complete!")
-        console.print(f"  Results saved to: [cyan]{output}[/]")
+        queries = predict_mod.read_query_list(query_list)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Predicting", total=len(queries))
+            batch = predict_mod.predict_queries(
+                queries,
+                model_dir=model,
+                output_path=output,
+                threads=threads,
+                on_progress=lambda q: progress.advance(task),
+                intermediate_dir=intermediate_dir,
+            )
     except Exception as e:
         console.print(f"[red]✗ Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+    n_phenotypes = len({r.phenotype for r in batch.results})
+    n_ok = len(queries) - len(batch.failures)
+    console.print(
+        f"\n[green]✓[/] Predicted {n_phenotypes} phenotype(s) for {n_ok}/{len(queries)} isolate(s)"
+    )
+    console.print(f"  Results saved to: [cyan]{output}[/]")
+    if intermediate_dir is not None:
+        console.print(f"  Intermediate files: [cyan]{intermediate_dir}[/]")
+    if batch.failures:
+        console.print(f"\n[red]✗ {len(batch.failures)} isolate(s) failed[/] (rows written with prediction 'error'):")
+        for qid, msg in batch.failures.items():
+            console.print(f"  {qid}: {msg}")
         raise typer.Exit(code=1)
 
 if __name__ == "__main__":
